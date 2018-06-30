@@ -5,27 +5,167 @@
 
 RTC_DS3231 rtc;
 SoftwareSerial BT(10, 11); // RX, TX
+DateTime currentDT;
+DateTime future_alarm;
 
 const byte rtcAlarmPin = 2; // External interrupt on pin D3
-String command = ""; // Stores response of bluetooth device
-String response = "";
-DateTime currentDT;
-DateTime alarm1;
-DateTime alarm2;
-int duration1;
-int duration2;
+int solenoidPin = 4; //water valve
+bool opened = false;
+char command[30];
 
-void setAlarm(int al, String dt, int duration){
-  if(al==1){
-      duration1=duration;
-    }else{
-        duration2=duration;
-      }
+// char [] = {hour, minutes, duration}
+int al1[] = {0, 0, 0};
+int al2[] = {0, 0, 0};
+bool active1=false;
+bool active2=false;
+
+void clearCommands(){
+  int i;
+  int sz = sizeof(command) - 1;
+  for(i=0;i<sz; i++){
+    command[i] = 0;
+    }
   }
 
+String getMyDateTime(){
+  String dtText = "1|";
+  currentDT = rtc.now();
+  dtText += String(currentDT.day());
+  dtText += "/";
+  dtText += String(currentDT.month());
+  dtText += "/";
+  dtText += String(currentDT.year());
+  dtText += " - ";
+  dtText += String(currentDT.hour());
+  dtText += ":";
+  dtText += String(currentDT.minute());
+  dtText += ":";
+  dtText += String(currentDT.second());
+  return dtText; 
+}
+
+void setDateTime(char *info){
+  char* data = strtok(info, "|");
+  char* dt = strtok(data[1], "-");
+  char* tm = strtok(NULL,"-");
+
+  String days = String(dt[0]) + String(dt[1]);
+  String months = String(dt[3]) + String(dt[4]);
+  String years = String(dt[6]) + String(dt[7]) + String(dt[8]) + String(dt[9]);
+  String hours= String(tm[0]) + String(tm[1]);
+  String mins = String(tm[3]) + String(tm[4]);
+  String secs = String(tm[6]) + String(tm[7]);
+  
+  setTime(hours.toInt(), mins.toInt(), secs.toInt(), days.toInt(), months.toInt(), years.toInt());
+  //RTC.set(now()); 
+  rtc.adjust(now());
+  Serial.println(getMyDateTime());
+  }
+
+String getAlarm(char al){
+  String dtText;
+  if(al == '4'){
+    dtText += "4|";
+    dtText += al1[0];
+    dtText += ":";
+    dtText += al1[1];
+    dtText += "|";
+    dtText += al1[2];
+    dtText += "|";
+    dtText += active1; 
+  }else{
+    dtText += "5|";
+    dtText += String(al2[0]);
+    dtText += ":";
+    dtText += String(al2[1]);
+    dtText += "|";
+    dtText += String(al2[2]);
+    dtText += "|";
+    dtText += String(active2); 
+  }
+  return dtText; 
+}
+
+void setAlarm(int al, int hrs, int mins, int duration, bool state){
+  DateTime now = rtc.now();
+  Serial.println(state);
+  if(al==6){
+    al1[0] = hrs;
+    al1[1] = mins;
+    al1[2] = duration;
+    active1 = state;
+
+    RTC.alarm(ALARM_1);
+    if(hrs > now.hour()){
+      RTC.setAlarm(ALM1_MATCH_DATE, 0, mins, hrs, now.day());
+    } else {
+      DateTime future (now + TimeSpan(0, hrs, mins, 0)); //Days, Hours, Minutes, Seconds
+      printDateTime(future);
+      RTC.setAlarm(ALM1_MATCH_DATE, future.second(), future.minute(), future.hour(), future.day());
+    }
+    
+  }else{
+    al2[0] = hrs;
+    al2[1] = mins;
+    al2[2] = duration;
+    active2 = state;
+
+    if(state){
+      RTC.alarm(ALARM_2);
+      RTC.alarmInterrupt(ALARM_2, true); // Enable alarm 2 interrupt A1IE   
+      if(hrs > now.hour()){
+        RTC.setAlarm(ALM2_MATCH_DATE, 0, mins, hrs, now.day());
+      } else {
+        DateTime future (now + TimeSpan(0, hrs, mins, 0)); //Days, Hours, Minutes, Seconds
+        printDateTime(future);
+        RTC.setAlarm(ALM2_MATCH_DATE, future.second(), future.minute(), future.hour(), future.day());
+      }
+    }else{
+      RTC.alarmInterrupt(ALARM_2, false);
+    }  
+  }
+}
+
+void defineAlarm(char *info){
+  char* data = strtok(info, "|");
+  char* tm = strtok(NULL, "|");
+  char* duration = strtok(NULL, "|");
+  char* state = strtok(NULL,"|");
+  char* hr = strtok(tm, ":");
+  char* mins = strtok(NULL, ":");
+  setAlarm(int(atoi(data)), int(atoi( hr )), int(atoi( mins )), int(atoi( duration )), bool(state));
+}
+
+void irrigate(){
+  if(opened){
+    digitalWrite(solenoidPin, LOW); //Switch Solenoid OFF
+    opened = false;
+  } else{
+    digitalWrite(solenoidPin, HIGH); //Switch Solenoid ON
+    opened = true;
+  }  
+}
+
+//duration in seconds
+void irrigation(int duration){
+  digitalWrite(solenoidPin, HIGH); //Switch Solenoid ON
+  opened = true;
+  delay(duration*1000);
+  digitalWrite(solenoidPin, LOW); //Switch Solenoid OFF
+  opened = false;  
+}
+
+void sendMsg(String data){
+  size_t size = data.length();
+  char *msg = malloc(size+1);
+  data.toCharArray(msg, size+1);
+  BT.println(msg);
+  delay(10);
+  free(msg);
+}
+
 void setup(){
-  duration1=0;
-  duration2=0;
+  pinMode(solenoidPin, OUTPUT);
   Serial.begin(9600);
   Serial.println("Type AT commands!");
   delay(200);
@@ -39,65 +179,33 @@ void setup(){
 }
 
 void loop(){
+  
   if(BT.available()>0){
+    int i = 0;
     while (BT.available() > 0) {
       char c = BT.read();
       delay(10); //Delay added to make thing stable
-      command += c;
-    }
-  }
-  delay(10);
-  if(command == '1'){
-    response = "1|" + getMyDateTime();
-    size_t size = response.length();
-    char *msg = malloc(size+1);
-    response.toCharArray(msg, size+1);
-    BT.println(msg);
-    delay(10);
-    free(msg);
-   } else if(command == '2'){
-    delay(10);
-    int i=0;
-    char rcvDt[20];
-    while(BT.available()){
-      char c_msg = BT.read(); //Conduct a serial read
-      rcvDt[i]=c_msg;
+      command[i] = c;
       i++;
-      delay(10); //Delay added to make thing stabl
     }
-    setTime(rcvDt);
-    } else if(command == '3'){
-    water(command);
-   } else if(command == '4'){
-    Serial.println(command);
-   } else if(command == '5'){
-    Serial.println(command);
-   } else if(command == '6'){
-    Serial.println(command);
-   } else if(command == '7'){
-    Serial.println(command);
-   }
-   command = "";
-   delay(10);
-}
-
-void setTime(char dt[20]){
-//  int days = 0;
-//  int months = 0;
-//  int years = 0;
-//  int hours = 0;
-//  int minutes = 0;
-//  int seconds = 0;
-//  int i;
-//  for (i = 0; i < 19; i++) {
-//    Serial.println(myPins[i]);
-//    }
-  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  currentDT = rtc.now();
-  }
-
-void water(String msg){
-  Serial.println("OPEN WATER");
+    command[i]='\0';
+    delay(10);
+    if(command[0] == '1'){
+      String response = getMyDateTime();
+      sendMsg(response);
+     } else if(command[0] == '2'){
+      setDateTime(command);
+      } else if(command[0] == '3'){
+      irrigate();
+     } else if((command[0] == '4') || (command[0] == '5')){
+      String response = getAlarm(int(command[0]));
+      sendMsg(response);
+     } else if((command[0] == '6') || (command[0] == '7')){
+      defineAlarm(command);
+     }
+     clearCommands();
+     delay(10);
+    }
 }
 
 void printDateTime(DateTime t)
@@ -108,17 +216,4 @@ void printDateTime(DateTime t)
   Serial.print((t.hour() < 10) ? "0" : ""); Serial.print(t.hour(), DEC); Serial.print(':');
   Serial.print((t.minute() < 10) ? "0" : ""); Serial.print(t.minute(), DEC); Serial.print(':');
   Serial.print((t.second() < 10) ? "0" : ""); Serial.println(t.second(), DEC);
-}
-
-String getMyDateTime(){
-  String dtText = String(currentDT.day());
-  dtText += "/";
-  dtText += String(currentDT.month());
-  dtText += "/";
-  dtText += String(currentDT.year());
-  dtText += " - ";
-  dtText += String(currentDT.hour());
-  dtText += ":";
-  dtText += String(currentDT.minute());
-  return dtText; 
 }
